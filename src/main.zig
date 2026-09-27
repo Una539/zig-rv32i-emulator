@@ -2,7 +2,17 @@ const std = @import("std");
 
 const Cpu = struct { register: [32]u32, pc: u32, memory: [1024 * 1024]u8 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
+    var args = init.minimal.args.iterate();
+    defer args.deinit();
+
+    _ = args.next();
+
+    const path = args.next() orelse {
+        std.debug.print("Usage: zig run src/main.zig -- <Path to ELF>\n", .{});
+        return error.MissingElfPath;
+    };
+
     // 创建一台虚拟机，带有32位寄存器和1MiB的内存
     var machine = Cpu{ .register = [_]u32{0} ** 32, .pc = 0, .memory = [_]u8{0} ** (1024 * 1024) };
     std.debug.print("The Machine:\n", .{});
@@ -10,15 +20,18 @@ pub fn main() !void {
     std.debug.print("register[0] = {d}\n", .{machine.register[0]});
     std.debug.print("memory[0x00000010] = {d}\n\n", .{machine.memory[0x00000010]});
 
-    // 测试一个取指
-    machine.memory[0] = 0x13;
-    machine.memory[1] = 0x05;
-    machine.memory[2] = 0x70;
-    machine.memory[3] = 0x00;
-    machine.memory[4] = 0x13;
-    machine.memory[5] = 0x05;
-    machine.memory[6] = 0x35;
-    machine.memory[7] = 0x00;
+    const allocator = std.heap.page_allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1024 * 1024));
+    defer allocator.free(bytes);
+
+    std.debug.print("File size: {d} bytes\n\n", .{bytes.len});
+
+    try loadfromfile(bytes, &machine);
+
     for (0..2) |_| {
         const instruction = try fetch(machine);
         std.debug.print("Try fetch: instruction = 0x{x:0>8}\n\n", .{instruction});
@@ -26,6 +39,68 @@ pub fn main() !void {
     }
     std.debug.print("Try decode and run.\nThe result is in result register = {d}\n", .{machine.register[10]});
     std.debug.print("Updated PC = {d}\n\n", .{machine.pc});
+}
+
+fn readU32(bytes: []const u8, offset: usize) u32 {
+    return @as(u32, bytes[offset]) |
+        (@as(u32, bytes[offset + 1]) << 8) |
+        (@as(u32, bytes[offset + 2]) << 16) |
+        (@as(u32, bytes[offset + 3]) << 24);
+}
+
+inline fn loadfromfile(bytes: []u8, machine: *Cpu) !void {
+    // 检查文件头
+    if (bytes.len < 4 or !std.mem.eql(u8, bytes[0..4], "\x7fELF")) {
+        return error.NotELF;
+    } else if (bytes.len < 52 or bytes[4] != 1 or bytes[5] != 1) {
+        return error.NotELF32OrLittleEndianValue;
+    } else {
+        const e_type: u16 = @as(u16, bytes[16]) | (@as(u16, bytes[17]) << 8);
+        const e_machine: u16 = @as(u16, bytes[18]) | (@as(u16, bytes[19]) << 8);
+        if (e_type != 2 or e_machine != 243) {
+            return error.NotRISCV;
+        }
+    }
+
+    const e_entry: u32 = readU32(bytes, 24);
+    const e_phoff: u32 = readU32(bytes, 28);
+    const e_phnum: u16 = @as(u16, bytes[44]) | (@as(u16, bytes[45]) << 8);
+    const e_phentsize: u16 = @as(u16, bytes[42]) | (@as(u16, bytes[43]) << 8);
+    if (e_phentsize != 32) {
+        return error.IsNotELF32;
+    }
+
+    for (0..e_phnum) |i| {
+        const ph: usize = @as(usize, e_phoff) + i * @as(usize, e_phentsize);
+        if (ph > bytes.len or bytes.len - ph < 32) {
+            return error.FileHasNoHead;
+        }
+
+        const p_type = readU32(bytes, ph);
+        const p_offset = readU32(bytes, ph + 4);
+        const p_vaddr = readU32(bytes, ph + 8);
+        const p_filesz = readU32(bytes, ph + 16);
+        const p_memsz = readU32(bytes, ph + 20);
+
+        if (p_type != 1) continue;
+
+        const file_start: usize = @intCast(p_offset);
+        const mem_start: usize = @intCast(p_vaddr);
+        const file_size: usize = @intCast(p_filesz);
+        const mem_size: usize = @intCast(p_memsz);
+
+        if (file_size > mem_size) return error.FileSizeExceedsMemorySize;
+        if (file_start > bytes.len or file_size > bytes.len - file_start)
+            return error.FileIsTooSmall;
+        if (mem_start > machine.memory.len or mem_size > machine.memory.len - mem_start)
+            return error.MemoryIsTooSmall;
+
+        // 装载内存
+        @memcpy(machine.memory[mem_start .. mem_start + file_size], bytes[file_start .. file_start + file_size]);
+        @memset(machine.memory[mem_start + file_size .. mem_start + mem_size], 0);
+    }
+
+    machine.pc = e_entry;
 }
 
 // Cpu取指
