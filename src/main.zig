@@ -12,24 +12,20 @@ pub fn main() !void {
 
     // 测试一个取指
     machine.memory[0] = 0x13;
-    machine.memory[1] = 0x00;
+    machine.memory[1] = 0x05;
     machine.memory[2] = 0x70;
     machine.memory[3] = 0x00;
-    const instruction = try fetch(machine);
-    std.debug.print("Try fetch: instruction = 0x{x:0>8}\n\n", .{instruction});
-
-    // 测试一个解码
-    const decoded: IShapedInstruction = idecode(instruction);
-    std.debug.print("Decoded: \n", .{});
-    std.debug.print("imm = {d}\n", .{decoded.imm});
-    std.debug.print("rs1 = {d}\n", .{decoded.rs1});
-    std.debug.print("funct3 = {d}\n", .{decoded.funct3});
-    std.debug.print("rd = {d}\n", .{decoded.rd});
-    std.debug.print("opcode = 0x{x}\n\n", .{decoded.opcode});
-
-    // 测试运行addi
-    addi(decoded, &machine);
-    std.debug.print("The result is in X10 = {d}\n\n", .{machine.register[decoded.rd]});
+    machine.memory[4] = 0x13;
+    machine.memory[5] = 0x05;
+    machine.memory[6] = 0x35;
+    machine.memory[7] = 0x00;
+    for (0..2) |_| {
+        const instruction = try fetch(machine);
+        std.debug.print("Try fetch: instruction = 0x{x:0>8}\n\n", .{instruction});
+        try derun(instruction, &machine);
+    }
+    std.debug.print("Try decode and run.\nThe result is in result register = {d}\n", .{machine.register[10]});
+    std.debug.print("Updated PC = {d}\n\n", .{machine.pc});
 }
 
 // Cpu取指
@@ -51,13 +47,17 @@ pub fn fetch(machine: Cpu) !u32 {
     }
 }
 
-pub fn derun(raw_instruction: u32, machine: *Cpu) void {
+pub fn derun(raw_instruction: u32, machine: *Cpu) !void {
     if (raw_instruction & 0x7F == 0x13) {
         const ins = idecode(raw_instruction);
         if (ins.funct3 == 0) {
             addi(ins, machine);
+        } else {
+            return error.UnsupportedIShapeInstruction;
         }
         machine.pc += 4;
+    } else {
+        return error.UnsupportedInstrucionShape;
     }
 }
 
